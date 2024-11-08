@@ -95,8 +95,26 @@ auto BlockManager::write_block(block_id_t block_id, const u8 *data)
   
 
   // TODO: Implement this function.
+<<<<<<< HEAD
   UNIMPLEMENTED();
   this->write_fail_cnt++;
+=======
+  
+  if (block_id >= this->block_cnt) {
+    this->write_fail_cnt++;
+    return ChfsNullResult(ErrorType::INVALID_ARG);
+  }
+  
+  if (this->in_memory) {
+    std::memcpy(this->block_data + block_id * this->block_sz, data, this->block_sz);
+  } else {
+    auto res = pwrite(this->fd, data, this->block_sz, block_id * this->block_sz);
+    if (res != this->block_sz) {
+      return ChfsNullResult(ErrorType::DONE);
+    }
+  }
+
+>>>>>>> lab1
   return KNullOk;
 }
 
@@ -111,15 +129,44 @@ auto BlockManager::write_partial_block(block_id_t block_id, const u8 *data,
   }
 
   // TODO: Implement this function.
+<<<<<<< HEAD
   UNIMPLEMENTED();
   this->write_fail_cnt++;
+=======
+
+  if (block_id >= this->block_cnt || offset + len > this->block_sz) {
+    this->write_fail_cnt++;
+    return ChfsNullResult(ErrorType::INVALID_ARG);
+  }
+
+  if (this->in_memory) {
+    std::memcpy(this->block_data + block_id * this->block_sz + offset, data, len);
+  } else {
+    auto res = pwrite(this->fd, data, len, block_id * this->block_sz + offset);
+    if (res != len) {
+      return ChfsNullResult(ErrorType::DONE);
+    }
+  }
+
+>>>>>>> lab1
   return KNullOk;
 }
 
 auto BlockManager::read_block(block_id_t block_id, u8 *data) -> ChfsNullResult {
 
   // TODO: Implement this function.
-  UNIMPLEMENTED();
+  if (block_id >= this->block_cnt) {
+    return ChfsNullResult(ErrorType::INVALID_ARG);
+  }
+
+  if (this->in_memory) {
+    std::memcpy(data, this->block_data + block_id * this->block_sz, this->block_sz);
+  } else {
+    auto res = pread(this->fd, data, this->block_sz, block_id * this->block_sz);
+    if (res != this->block_sz) {
+      return ChfsNullResult(ErrorType::DONE);
+    }
+  }
 
   return KNullOk;
 }
@@ -127,8 +174,41 @@ auto BlockManager::read_block(block_id_t block_id, u8 *data) -> ChfsNullResult {
 auto BlockManager::zero_block(block_id_t block_id) -> ChfsNullResult {
   
   // TODO: Implement this function.
-  UNIMPLEMENTED();
+  if (block_id > this->block_cnt) {
+    return ChfsNullResult(ErrorType::INVALID_ARG);
+  }
+  
+  u8* zeroed_block = new u8[this->block_sz];
+  std::memset(zeroed_block, 0, this->block_sz);
 
+  if (this->in_memory) {
+    std::memcpy(this->block_data + block_id * this->block_sz, zeroed_block, this->block_sz);
+  } else {
+    auto res = pwrite(this->fd, zeroed_block, this->block_sz, block_id * this->block_sz);
+    if (res != this->block_sz) {
+      return ChfsNullResult(ErrorType::DONE);
+    }
+  }
+
+  return KNullOk;
+}
+
+auto BlockManager::sync(block_id_t block_id) -> ChfsNullResult {
+  if (block_id >= this->block_cnt) {
+    return ChfsNullResult(ErrorType::INVALID_ARG);
+  }
+
+  auto res = msync(this->block_data + block_id * this->block_sz, this->block_sz,
+        MS_SYNC | MS_INVALIDATE);
+  if (res != 0)
+    return ChfsNullResult(ErrorType::INVALID);
+  return KNullOk;
+}
+
+auto BlockManager::flush() -> ChfsNullResult {
+  auto res = msync(this->block_data, this->block_sz * this->block_cnt, MS_SYNC | MS_INVALIDATE);
+  if (res != 0)
+    return ChfsNullResult(ErrorType::INVALID);
   return KNullOk;
 }
 
