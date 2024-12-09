@@ -3,6 +3,7 @@
 #include "common/bitmap.h"
 #include "metadata/inode.h"
 #include "metadata/manager.h"
+#include "distributed/commit_log.h"
 
 namespace chfs {
 
@@ -72,7 +73,6 @@ auto InodeManager::allocate_inode(InodeType type, block_id_t bid)
   auto iter_res = BlockIterator::create(this->bm.get(), 1 + n_table_blocks,
                                         1 + n_table_blocks + n_bitmap_blocks);
   if (iter_res.is_err()) {
-    std::cout << "Error1" << std::endl;
     return ChfsResult<inode_id_t>(iter_res.unwrap_error());
   }
 
@@ -109,9 +109,83 @@ auto InodeManager::allocate_inode(InodeType type, block_id_t bid)
       std::vector<u8> buffer(bm->block_size());
       Inode inode(type, bm->block_size());
       inode.flush_to_buffer(buffer.data());
-      bm->write_block(bid, buffer.data());
+      auto write_res = bm->write_block(bid, buffer.data());
+      if (write_res.is_err()) {
+        return ChfsResult<inode_id_t>(write_res.unwrap_error());
+      }
 
       set_table(raw_id, bid);
+
+      return ChfsResult<inode_id_t>(RAW_2_LOGIC(raw_id));
+    }
+  }
+
+  std::cout << "Error3" << std::endl;
+  return ChfsResult<inode_id_t>(ErrorType::OUT_OF_RESOURCE);
+}
+
+auto InodeManager::allocate_inode_atomic(InodeType type, block_id_t bid, std::vector<std::shared_ptr<BlockOperation>> &ops) 
+    -> ChfsResult<inode_id_t> {
+  auto iter_res = BlockIterator::create(this->bm.get(), 1 + n_table_blocks,
+                                        1 + n_table_blocks + n_bitmap_blocks);
+  if (iter_res.is_err()) {
+    return ChfsResult<inode_id_t>(iter_res.unwrap_error());
+  }
+
+  inode_id_t count = 0;
+  block_id_t iter_id = 1 + n_table_blocks;
+
+  // Find an available inode ID.
+  for (auto iter = iter_res.unwrap(); iter.has_next();
+       iter.next(bm->block_size()).unwrap(), count++) {
+    bool is_in_memory = false;
+    auto op_index = 0;
+    auto data = iter.unsafe_get_value_ptr<u8>();
+    auto bitmap = Bitmap(data, bm->block_size());
+
+    std::vector<u8> buffer(bm->block_size());
+    for (usize i = 0; i < ops.size(); i++) {
+      if (ops[i]->block_id_ == iter_id) {
+        is_in_memory = true;
+        op_index = i;
+        break;
+      }
+    }
+
+    if (!is_in_memory) {
+      std::memcpy(buffer.data(), ops[op_index]->new_block_state_.data(), bm->block_size());
+    }
+    auto free_idx = bitmap.find_first_free();
+
+    if (free_idx) {
+      // If there is an available inode ID.
+
+      // Setup the bitmap.
+      bitmap.set(free_idx.value());
+
+      if (is_in_memory) {
+        bm->write_block_atomic(iter_id, buffer.data(), ops);
+      }
+      else {
+        auto res = iter.flush_cur_block_atomic(ops);
+        if (res.is_err()) {
+          std::cout << "Error2" << std::endl;
+          return ChfsResult<inode_id_t>(res.unwrap_error());
+        }
+      }
+
+      const auto total_bits_per_block = this->bm->block_size() * KBitsPerByte;
+      inode_id_t raw_id = free_idx.value() + count * total_bits_per_block;
+
+      std::vector<u8> buffer(bm->block_size());
+      Inode inode(type, bm->block_size());
+      inode.flush_to_buffer(buffer.data());
+      auto write_res = bm->write_block_atomic(bid, buffer.data(), ops);
+      if (write_res.is_err()) {
+        return ChfsResult<inode_id_t>(write_res.unwrap_error());
+      }
+
+      set_table_atomic(raw_id, bid, ops);
 
       return ChfsResult<inode_id_t>(RAW_2_LOGIC(raw_id));
     }
@@ -130,7 +204,25 @@ auto InodeManager::set_table(inode_id_t idx, block_id_t bid) -> ChfsNullResult {
   auto inode_per_block = bm->block_size() / sizeof(block_id_t);
   auto table_block_id = 1 + idx / inode_per_block;
   auto table_block_offset = idx % inode_per_block;
-  bm->write_partial_block(table_block_id, reinterpret_cast<u8 *>(&bid), table_block_offset * sizeof(block_id_t), sizeof(block_id_t));
+  auto res = bm->write_partial_block(table_block_id, reinterpret_cast<u8 *>(&bid), table_block_offset * sizeof(block_id_t), sizeof(block_id_t));
+  if (res.is_err()) {
+    return ChfsNullResult(res.unwrap_error());
+  }
+
+  return KNullOk;
+}
+
+auto InodeManager::set_table_atomic(inode_id_t idx, block_id_t bid, std::vector<std::shared_ptr<BlockOperation>> &ops) -> ChfsNullResult {
+  auto inode_per_block = bm->block_size() / sizeof(block_id_t);
+  auto table_block_id = 1 + idx / inode_per_block;
+  auto table_block_offset = idx % inode_per_block;
+  std::vector<u8> buffer(bm->block_size());
+  bm->read_block_atomic(table_block_id, buffer.data(), ops);
+  reinterpret_cast<block_id_t *>(buffer.data())[table_block_offset] = bid;
+  auto res = bm->write_block_atomic(table_block_id, buffer.data(), ops);
+  if (res.is_err()) {
+    return ChfsNullResult(res.unwrap_error());
+  }
 
   return KNullOk;
 }
@@ -151,6 +243,21 @@ auto InodeManager::get(inode_id_t id) -> ChfsResult<block_id_t> {
   auto table_block_id = 1 + raw_id / inode_per_block;
   auto table_block_offset = raw_id % inode_per_block;
   bm->read_block(table_block_id, buffer.data());
+  res_block_id = *reinterpret_cast<block_id_t *>(buffer.data() + table_block_offset * sizeof(block_id_t));
+
+  return ChfsResult<block_id_t>(res_block_id);
+}
+
+auto InodeManager::get_atomic(inode_id_t id, std::vector<std::shared_ptr<BlockOperation>> &ops) -> ChfsResult<block_id_t> {
+  block_id_t res_block_id = 0;
+
+  inode_id_t raw_id = LOGIC_2_RAW(id);
+  std::vector<u8> buffer(bm->block_size());
+
+  auto inode_per_block = bm->block_size() / sizeof(block_id_t);
+  auto table_block_id = 1 + raw_id / inode_per_block;
+  auto table_block_offset = raw_id % inode_per_block;
+  bm->read_block_atomic(table_block_id, buffer.data(), ops);
   res_block_id = *reinterpret_cast<block_id_t *>(buffer.data() + table_block_offset * sizeof(block_id_t));
 
   return ChfsResult<block_id_t>(res_block_id);
@@ -234,6 +341,29 @@ auto InodeManager::read_inode(inode_id_t id, std::vector<u8> &buffer)
   return ChfsResult<block_id_t>(block_id.unwrap());
 }
 
+auto InodeManager::read_inode_atomic(inode_id_t id, std::vector<u8> &buffer,
+                                     std::vector<std::shared_ptr<BlockOperation>> &ops)
+    -> ChfsResult<block_id_t> {
+  if (id >= max_inode_supported - 1) {
+    return ChfsResult<block_id_t>(ErrorType::INVALID_ARG);
+  }
+
+  auto block_id = this->get_atomic(id, ops);
+  if (block_id.is_err()) {
+    return ChfsResult<block_id_t>(block_id.unwrap_error());
+  }
+
+  if (block_id.unwrap() == KInvalidBlockID) {
+    return ChfsResult<block_id_t>(ErrorType::INVALID_ARG);
+  }
+
+  auto res = bm->read_block_atomic(block_id.unwrap(), buffer.data(), ops);
+  if (res.is_err()) {
+    return ChfsResult<block_id_t>(res.unwrap_error());
+  }
+  return ChfsResult<block_id_t>(block_id.unwrap());
+}
+
 // {Your code}
 auto InodeManager::free_inode(inode_id_t id) -> ChfsNullResult {
 
@@ -263,6 +393,33 @@ auto InodeManager::free_inode(inode_id_t id) -> ChfsNullResult {
   Bitmap bitmap(buffer.data(), bm->block_size());
   bitmap.clear(bitmap_block_offset);
   bm->write_block(bitmap_block_id, buffer.data());
+
+  return KNullOk;
+}
+
+auto InodeManager::free_inode_atomic(inode_id_t id, std::vector<std::shared_ptr<BlockOperation>> &ops) -> ChfsNullResult {
+   if (id >= max_inode_supported - 1) {
+    return ChfsNullResult(ErrorType::INVALID_ARG);
+  }
+
+  inode_id_t raw_id = LOGIC_2_RAW(id);
+
+  auto inode_per_block = bm->block_size() / sizeof(block_id_t);
+  auto table_block_id = 1 + raw_id / inode_per_block;
+  auto table_block_offset = raw_id % inode_per_block;
+  std::vector<u8> buffer(bm->block_size());
+  bm->read_block_atomic(table_block_id, buffer.data(), ops);
+  block_id_t invalid_id = KInvalidBlockID;
+  reinterpret_cast<block_id_t *>(buffer.data())[table_block_offset] = invalid_id;
+  bm->write_block_atomic(table_block_id, buffer.data(), ops);
+
+  auto inode_bits_per_block = bm->block_size() * KBitsPerByte;
+  auto bitmap_block_id = 1 + n_table_blocks + raw_id / inode_bits_per_block;
+  auto bitmap_block_offset = raw_id % inode_bits_per_block;
+  bm->read_block_atomic(bitmap_block_id, buffer.data(), ops);
+  Bitmap bitmap(buffer.data(), bm->block_size());
+  bitmap.clear(bitmap_block_offset);
+  bm->write_block_atomic(bitmap_block_id, buffer.data(), ops);
 
   return KNullOk;
 }

@@ -11,16 +11,21 @@ auto DataServer::initialize(std::string const &data_path) {
    * existing data.
    */
   bool is_initialized = is_file_exist(data_path);
+  const auto total_version_per_block = DiskBlockSize / sizeof(version_t);
+  const auto version_block_cnt = (KDefaultBlockCnt - 1) / total_version_per_block + 1;
 
   auto bm = std::shared_ptr<BlockManager>(
       new BlockManager(data_path, KDefaultBlockCnt));
   if (is_initialized) {
     block_allocator_ =
-        std::make_shared<BlockAllocator>(bm, 0, false);
+        std::make_shared<BlockAllocator>(bm, version_block_cnt, false);
   } else {
     // We need to reserve some blocks for storing the version of each block
     block_allocator_ = std::shared_ptr<BlockAllocator>(
-        new BlockAllocator(bm, 0, true));
+        new BlockAllocator(bm, version_block_cnt, true));
+    for (block_id_t i = 0; i < version_block_cnt; i++) {
+      this->block_allocator_->bm->zero_block(i);
+    }
   }
 
   // Initialize the RPC server and bind all handlers
@@ -58,11 +63,7 @@ DataServer::~DataServer() { server_.reset(); }
 auto DataServer::read_data(block_id_t block_id, usize offset, usize len,
                            version_t version) -> std::vector<u8> {
   // TODO: Implement this function.
-<<<<<<< HEAD
-  UNIMPLEMENTED();
 
-  return {};
-=======
   if (offset + len > block_allocator_->bm->block_size()) {
     return std::vector<u8> {};
   }
@@ -73,30 +74,30 @@ auto DataServer::read_data(block_id_t block_id, usize offset, usize len,
   auto version_block_id = block_id / total_version_per_block;
   auto version_block_index = block_id % total_version_per_block;
 
-  block_allocator_->bm->read_block(version_block_id, buffer.data());
-  auto res = *reinterpret_cast<version_t *>(buffer.data() + version_block_index * sizeof(version_t));
+  auto res = block_allocator_->bm->read_block(version_block_id, buffer.data());
+  if (res.is_err()) {
+    return std::vector<u8> {};
+  }
 
-  if (res.is_err() || res.unwrap() != version) {
+  version_t current_version = *reinterpret_cast<version_t *>(buffer.data() + version_block_index * sizeof(version_t));
+  if (current_version != version) {
     return std::vector<u8> {};
   }
 
   res = block_allocator_->bm->read_block(block_id, buffer.data());
-  if 
+  if (res.is_err()) {
+    return std::vector<u8> {};
+  }
   std::vector<u8> result(buffer.begin() + offset, buffer.begin() + offset + len);
 
   return result;
->>>>>>> lab1
 }
 
 // {Your code here}
 auto DataServer::write_data(block_id_t block_id, usize offset,
                             std::vector<u8> &buffer) -> bool {
   // TODO: Implement this function.
-<<<<<<< HEAD
-  UNIMPLEMENTED();
 
-  return false;
-=======
   if (buffer.size() + offset > block_allocator_->bm->block_size()) {
     return false;
   }
@@ -108,23 +109,18 @@ auto DataServer::write_data(block_id_t block_id, usize offset,
   }
 
   return true;
->>>>>>> lab1
 }
 
 // {Your code here}
 auto DataServer::alloc_block() -> std::pair<block_id_t, version_t> {
   // TODO: Implement this function.
-<<<<<<< HEAD
-  UNIMPLEMENTED();
 
-  return {};
-=======
-  auto res = block_allocator_->alloc_block();
-  if (res.is_err()) {
-    return {KInvalidBlockID, KInvalidVersion};
+  auto alloc_res = block_allocator_->allocate();
+  if (alloc_res.is_err()) {
+    return {0, 0};
   }
 
-  block_id_t block_id = res.unwrap();
+  block_id_t block_id = alloc_res.unwrap();
   version_t version = 0;
 
   const auto total_version_per_block = block_allocator_->bm->block_size() / sizeof(version_t);
@@ -132,33 +128,29 @@ auto DataServer::alloc_block() -> std::pair<block_id_t, version_t> {
   auto version_block_index = block_id % total_version_per_block;
   std::vector<u8> buffer(block_allocator_->bm->block_size());
 
-  res = block_allocator_->bm->read_block(version_block_id, buffer.data());
-  if (res.is_err()) {
-    return {KInvalidBlockID, KInvalidVersion};
+  auto read_res = block_allocator_->bm->read_block(version_block_id, buffer.data());
+  if (read_res.is_err()) {
+    return {0, 0};
   }
 
+  // Update the version of the block
   version = *reinterpret_cast<version_t *>(buffer.data() + version_block_index * sizeof(version_t));
   version += 1;
-  res = block_allocator_->bm->write_partial_block(version_block_id, reinterpret_cast<u8 *>(&version),
+  read_res = block_allocator_->bm->write_partial_block(version_block_id, reinterpret_cast<u8 *>(&version),
                                                   version_block_index * sizeof(version_t), sizeof(version_t));
-  if (res.is_err()) {
-    return {KInvalidBlockID, KInvalidVersion};
+  if (read_res.is_err()) {
+    return {0, 0};
   }
 
   return {block_id, version};
->>>>>>> lab1
 }
 
 // {Your code here}
 auto DataServer::free_block(block_id_t block_id) -> bool {
   // TODO: Implement this function.
-<<<<<<< HEAD
-  UNIMPLEMENTED();
 
-  return false;
-=======
-  auto res = block_allocator_->deallocate(block_id);
-  if (res.is_err()) {
+  auto dealloc_res = block_allocator_->deallocate(block_id);
+  if (dealloc_res.is_err()) {
     return false;
   }
 
@@ -169,20 +161,20 @@ auto DataServer::free_block(block_id_t block_id) -> bool {
   auto version_block_index = block_id % total_version_per_block;
   std::vector<u8> buffer(block_allocator_->bm->block_size());
 
-  res = block_allocator_->bm->read_block(version_block_id, buffer.data());
-  if (res.is_err()) {
+  auto read_res = block_allocator_->bm->read_block(version_block_id, buffer.data());
+  if (read_res.is_err()) {
     return false;
   }
 
+  // Update the version of the block
   version = *reinterpret_cast<version_t *>(buffer.data() + version_block_index * sizeof(version_t));
   version += 1;
-  res = block_allocator_->bm->write_partial_block(version_block_id, reinterpret_cast<u8 *>(&version),
-                                                  version_block_index * sizeof(version_t), sizeof(version_t));
-  if (res.is_err()) {
+  read_res = block_allocator_->bm->write_partial_block(version_block_id, reinterpret_cast<u8 *>(&version),
+                                                       version_block_index * sizeof(version_t), sizeof(version_t));
+  if (read_res.is_err()) {
     return false;
   }
 
   return true;
->>>>>>> lab1
 }
 } // namespace chfs
