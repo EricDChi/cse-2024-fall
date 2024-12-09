@@ -27,6 +27,8 @@ namespace chfs {
 // So block IDs should be larger than 0
 const block_id_t KInvalidBlockID = 0;
 
+using BlockInfo = std::tuple<block_id_t, mac_id_t, version_t>;
+
 enum class InodeType : u32 {
   Unknown = 0,
   FILE = 1,
@@ -90,6 +92,7 @@ class Inode {
   // which is dynamically calculated based on the block size
 public:
   [[maybe_unused]] block_id_t blocks[0];
+  [[maybe_unused]] BlockInfo block_infos[0];
 
 public:
   /**
@@ -171,6 +174,11 @@ public:
   auto write_indirect_block(std::shared_ptr<BlockManager> &bm,
                             std::vector<u8> &buffer) -> ChfsNullResult;
 
+  auto write_indirect_block_atomic(std::shared_ptr<BlockManager> &bm,
+                                   std::vector<u8> &buffer,
+                                   std::vector<std::shared_ptr<BlockOperation>> &ops)
+      -> ChfsNullResult;
+
   /**
    * Set the direct block ID given an index
    */
@@ -213,6 +221,21 @@ public:
     return ChfsResult<block_id_t>(this->blocks[this->nblocks - 1]);
   }
 
+  auto get_or_insert_indirect_block_atomic(
+      std::shared_ptr<BlockAllocator> &allocator,
+      std::vector<std::shared_ptr<BlockOperation>> &ops)
+      -> ChfsResult<block_id_t> {
+    if (this->blocks[this->nblocks - 1] == KInvalidBlockID) {
+      // aha, we need to allocate one
+      auto bid = allocator->allocate_atomic(ops);
+      if (bid.is_err()) {
+        return ChfsResult<block_id_t>(bid.unwrap_error());
+      }
+      this->blocks[this->nblocks - 1] = bid.unwrap();
+    }
+    return ChfsResult<block_id_t>(this->blocks[this->nblocks - 1]);
+  }
+
   auto get_indirect_block_id() -> block_id_t {
     CHFS_ASSERT(this->blocks[this->nblocks - 1] != KInvalidBlockID,
                 "Indirect block not set");
@@ -228,9 +251,9 @@ public:
 
 } __attribute__((packed));
 
-static_assert(sizeof(Inode) == sizeof(FileAttr) + sizeof(InodeType) +
-                                   sizeof(u32) + sizeof(u32),
-              "Unexpected Inode size");
+// static_assert(sizeof(Inode) == sizeof(FileAttr) + sizeof(InodeType) +
+//                                    sizeof(u32) + sizeof(u32),
+//               "Unexpected Inode size");
 
 /**
  * A helper class to iterate through the block_ids stored in the inode

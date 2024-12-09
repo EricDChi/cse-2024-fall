@@ -87,6 +87,9 @@ public:
    */
   auto allocate() -> ChfsResult<block_id_t>;
 
+  auto allocate_atomic(std::vector<std::shared_ptr<BlockOperation>> &ops)
+      -> ChfsResult<block_id_t>;
+
   /**
    * Deallocate a block.
    * @param block_id the block id to be deallocated.
@@ -95,6 +98,10 @@ public:
    *         other error code if there is other error.
    */
   auto deallocate(block_id_t block_id) -> ChfsNullResult;
+
+  auto deallocate_atomic(block_id_t block_id,
+                         std::vector<std::shared_ptr<BlockOperation>> &ops)
+      -> ChfsNullResult;
 };
 
 } // namespace chfs

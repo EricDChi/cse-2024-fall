@@ -62,6 +62,9 @@ public:
   /**
    * {Append anything if you need}
    */
+private:
+  usize log_entry_num_;
+  u64 current_log_offset_;
 };
 
 } // namespace chfs
