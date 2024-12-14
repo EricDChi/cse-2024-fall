@@ -167,11 +167,7 @@ RaftNode<StateMachine, Command>::RaftNode(int node_id, std::vector<RaftNodeConfi
     stopped(true),
     role(RaftRole::Follower),
     current_term(0),
-    leader_id(-1),
-    voted_for(-1),
-    commit_index(0),
-    last_applied(0),
-    voted_count(0)
+    leader_id(-1)
 {
     auto my_config = node_configs[my_id];
 
@@ -199,9 +195,32 @@ RaftNode<StateMachine, Command>::RaftNode(int node_id, std::vector<RaftNodeConfi
     next_index.resize(configs.size(), 0);
     match_index.resize(configs.size(), 0);
 
-    LogEntry<Command> entry;
-    entry.term = 0;
-    log_entries.push_back(entry);
+    voted_count = 0;
+
+    std::string log_path = "/tmp/raft_log/node_" + std::to_string(my_id);
+    bool is_initialized = is_file_exist(log_path);
+    if (!is_initialized) {
+        log_storage = std::make_unique<RaftLog<Command>>(log_path);
+        current_term = 0;
+        voted_for = -1;
+        commit_index = 0;
+        last_applied = 0;
+        LogEntry<Command> entry;
+        entry.term = 0;
+        log_entries.push_back(entry);
+    } else {
+        log_storage = std::make_unique<RaftLog<Command>>(log_path);
+        bool recover_metadata_res = log_storage->recover_metadata(current_term, voted_for, commit_index, last_applied);
+        if (!recover_metadata_res) {
+            RAFT_LOG("Node %d recover metadata failed", my_id);
+        }
+
+        bool recover_log_res = log_storage->recover_log(log_entries);
+        if (!recover_log_res) {
+            RAFT_LOG("Node %d recover log failed", my_id);
+        }
+        last_applied = 0;
+    }
 
     RAFT_LOG("Node %d created", my_id);
     rpc_server->run(true, configs.size()); 
@@ -296,12 +315,15 @@ auto RaftNode<StateMachine, Command>::new_command(std::vector<u8> cmd_data, int 
         return std::make_tuple(false, current_term, log_entries.size() - 1);
     }
 
+    RAFT_LOG("Node %d received new command term %d", my_id, current_term);
     LogEntry<Command> log_entry;
     log_entry.term = current_term;
     Command cmd;
     cmd.deserialize(cmd_data, cmd_size);
     log_entry.command = cmd;
     log_entries.push_back(log_entry);
+    // persist log
+    log_storage->persist_log(log_entries);
 
     return std::make_tuple(true, current_term, log_entries.size() - 1);
 }
@@ -363,6 +385,8 @@ auto RaftNode<StateMachine, Command>::request_vote(RequestVoteArgs args) -> Requ
         RAFT_LOG("Node %d received request vote from node %d but not up-to-date", my_id, args.candidate_id);
         reply.term = current_term;
         reply.vote_granted = false;
+        // persist metadata
+        log_storage->persist_metadata(current_term, voted_for, commit_index, last_applied);
         return reply;
     }
 
@@ -372,6 +396,8 @@ auto RaftNode<StateMachine, Command>::request_vote(RequestVoteArgs args) -> Requ
     reply.term = current_term;
     reply.vote_granted = true;
     leader_id = args.candidate_id;
+    // persist metadata
+    log_storage->persist_metadata(current_term, voted_for, commit_index, last_applied);
 
     last_heartbeat = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
 
@@ -394,6 +420,8 @@ void RaftNode<StateMachine, Command>::handle_request_vote_reply(int target, cons
         role = RaftRole::Follower;
         current_term = reply.term;
         voted_for = -1;
+        // persist metadata
+        log_storage->persist_metadata(current_term, voted_for, commit_index, last_applied);
         return;
     }
 
@@ -410,6 +438,7 @@ void RaftNode<StateMachine, Command>::handle_request_vote_reply(int target, cons
     voted_count++;
     if (voted_count > node_configs.size() / 2) {
         role = RaftRole::Leader;
+        RAFT_LOG("Node %d become leader", my_id);
         for (int i = 0; i < node_configs.size(); i++) {
             next_index[i] = log_entries.size();
             match_index[i] = 0;
@@ -427,10 +456,12 @@ auto RaftNode<StateMachine, Command>::append_entries(RpcAppendEntriesArgs rpc_ar
 
     last_heartbeat = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
 
-    RAFT_LOG("Node %d received append entries from node %d", my_id, rpc_arg.leader_id);
-
     AppendEntriesReply reply;
     AppendEntriesArgs<Command> arg = transform_rpc_append_entries_args<Command>(rpc_arg);
+
+    // check if metadata or log is changed
+    bool is_metadata_changed = false;
+    bool is_log_changed = false;
 
     // if term < currentTerm
     if (arg.term < current_term) {
@@ -443,12 +474,15 @@ auto RaftNode<StateMachine, Command>::append_entries(RpcAppendEntriesArgs rpc_ar
     current_term = arg.term;    
     voted_for = -1;
     leader_id = arg.leader_id;
+    is_metadata_changed = true;
 
     // if log doesn't contain an entry at prevLogIndex whose term matches prevLogTerm
     if (arg.prev_log_index > log_entries.size() - 1 || 
         (log_entries[arg.prev_log_index].term != arg.prev_log_term)) {
         reply.term = current_term;
         reply.success = false;
+        // persist metadata
+        log_storage->persist_metadata(current_term, voted_for, commit_index, last_applied);
         return reply;
     }
 
@@ -460,10 +494,12 @@ auto RaftNode<StateMachine, Command>::append_entries(RpcAppendEntriesArgs rpc_ar
             index++;
             if (index < log_entries.size() && log_entries[index].term != arg.log_entries[i].term) {
                 log_entries.erase(log_entries.begin() + index, log_entries.end());
+                is_log_changed = true;
             }
 
             if (index >= log_entries.size()) {
                 log_entries.push_back(arg.log_entries[i]);
+                is_log_changed = true;
             }
         }
     }
@@ -480,6 +516,15 @@ auto RaftNode<StateMachine, Command>::append_entries(RpcAppendEntriesArgs rpc_ar
 
     reply.term = current_term;
     reply.success = true;
+
+    // persist metadata
+    if (is_metadata_changed) {
+        log_storage->persist_metadata(current_term, voted_for, commit_index, last_applied);
+    }
+    // persist log
+    if (is_log_changed) {
+        log_storage->persist_log(log_entries);
+    }
 
     return reply;
 }
@@ -500,6 +545,8 @@ void RaftNode<StateMachine, Command>::handle_append_entries_reply(int node_id, c
         current_term = reply.term;
         role = RaftRole::Follower;
         voted_for = -1;
+        // persist metadata
+        log_storage->persist_metadata(current_term, voted_for, commit_index, last_applied);
         return;
     }
 
@@ -532,6 +579,7 @@ void RaftNode<StateMachine, Command>::handle_append_entries_reply(int node_id, c
 
                 if (count > node_configs.size() / 2) {
                     commit_index = N;
+                    log_storage->persist_metadata(current_term, voted_for, commit_index, last_applied);
                     break;
                 }
             }
@@ -658,7 +706,7 @@ void RaftNode<StateMachine, Command>::run_background_election() {
                 RequestVoteArgs args;
                 args.term = current_term;
                 args.candidate_id = my_id;
-                args.last_log_index = log_entries.size();
+                args.last_log_index = log_entries.size() - 1;
                 args.last_log_term = log_entries[log_entries.size() - 1].term;
 
                 for (auto map_it = rpc_clients_map.begin(); map_it != rpc_clients_map.end(); map_it++) {
@@ -668,11 +716,14 @@ void RaftNode<StateMachine, Command>::run_background_election() {
                     }
                     thread_pool->enqueue(&RaftNode::send_request_vote, this, target_id, args);
                 }
+
+                // persist metadata
+                log_storage->persist_metadata(current_term, voted_for, commit_index, last_applied);
             }
 
             mtx.unlock();
 
-            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
         }
     }
     return;
@@ -723,7 +774,7 @@ void RaftNode<StateMachine, Command>::run_background_commit() {
 
             mtx.unlock();
 
-            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            std::this_thread::sleep_for(std::chrono::milliseconds(40));
         }
     }
 
@@ -748,9 +799,12 @@ void RaftNode<StateMachine, Command>::run_background_apply() {
             if (last_applied < commit_index) {
                 last_applied++;
                 for (int i = last_applied; i <= commit_index; i++) {
+                    RAFT_LOG("Node %d apply log %d", my_id, i);
                     state->apply_log(log_entries[i].command);
                 }
                 last_applied = commit_index;
+                // persist metadata
+                log_storage->persist_metadata(current_term, voted_for, commit_index, last_applied);
             }
 
             mtx.unlock();
@@ -769,8 +823,6 @@ void RaftNode<StateMachine, Command>::run_background_ping() {
     // Only work for the leader.
 
     /* Uncomment following code when you finish */
-    RAFT_LOG("Node %d start ping", my_id);
-
     while (true) {
         {
             if (is_stopped()) {

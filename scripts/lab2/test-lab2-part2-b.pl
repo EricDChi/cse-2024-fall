@@ -164,7 +164,7 @@ sub writeat {
 }
 
 sub dircheck {
-    my($dir) = @_;
+    my($dir) = @_z;
 
     opendir(D, $dir);
     my %h;
