@@ -24,8 +24,10 @@ public:
     /* Lab3: Your code here */
     auto persist_metadata(int current_term, int voted_for, int commit_index, int last_applied) -> bool;
     auto persist_log(std::vector<LogEntry<Command>> &log_entries) -> bool;
+    auto persist_snapshot(int last_included_index, int last_included_term, std::vector<u8> &snapshot_data) -> bool;
     auto recover_metadata(int &current_term, int &voted_for, int &commit_index, int &last_applied) -> bool;
     auto recover_log(std::vector<LogEntry<Command>> &log_entries) -> bool;
+    auto recover_snapshot(int &last_included_index, int &last_included_term, std::vector<u8> &snapshot_data) -> bool;
 
 private:
     std::shared_ptr<BlockManager> bm_;
@@ -34,6 +36,7 @@ private:
     std::shared_ptr<FileOperation> operation_;
     inode_id_t log_id;
     inode_id_t metadata_id;
+    inode_id_t snapshot_id;
 };
 
 template <typename Command>
@@ -64,9 +67,8 @@ RaftLog<Command>::RaftLog(const std::string &data_path)
         operation_ = origin_res.unwrap();
 
         metadata_id = operation_->lookup(1, "raft_metadata").unwrap();
-        std::cout << "metadata_id: " << metadata_id << std::endl;
         log_id = operation_->lookup(1, "raft_log").unwrap();
-        std::cout << "log_id: " << log_id << std::endl;
+        snapshot_id = operation_->lookup(1, "raft_snapshot").unwrap();
     } else {
         // no need to make many inodes
         operation_ = std::make_shared<FileOperation>(block_manager, 4);
@@ -94,6 +96,14 @@ RaftLog<Command>::RaftLog(const std::string &data_path)
             exit(1);
         }
         log_id = make_log_res.unwrap();
+
+        // create a file for the snapshot
+        auto make_snapshot_res = operation_->mkfile(root_id, "raft_snapshot");
+        if (make_snapshot_res.is_err()) {
+            std::cerr << "Cannot create file for the snapshot." << std::endl;
+            exit(1);
+        }
+        snapshot_id = make_snapshot_res.unwrap();
     }
 }
 
@@ -146,6 +156,24 @@ auto RaftLog<Command>::persist_log(std::vector<LogEntry<Command>> &log_entries) 
 }
 
 template <typename Command>
+auto RaftLog<Command>::persist_snapshot(int last_included_index, int last_included_term, std::vector<u8> &snapshot_data) -> bool
+{
+    std::unique_lock<std::mutex> lock(mtx);
+
+    std::vector<u8> data;
+    data.insert(data.end(), reinterpret_cast<u8 *>(&last_included_index), reinterpret_cast<u8 *>(&last_included_index) + sizeof(int));
+    data.insert(data.end(), reinterpret_cast<u8 *>(&last_included_term), reinterpret_cast<u8 *>(&last_included_term) + sizeof(int));
+    data.insert(data.end(), snapshot_data.begin(), snapshot_data.end());
+
+    auto res = operation_->write_file(snapshot_id, data);
+    if (res.is_err()) {
+        return false;
+    }
+
+    return true;
+}
+
+template <typename Command>
 auto RaftLog<Command>::recover_metadata(int &current_term, int &voted_for, int &commit_index, int &last_applied) -> bool
 {
     std::unique_lock<std::mutex> lock(mtx);
@@ -182,6 +210,25 @@ auto RaftLog<Command>::recover_log(std::vector<LogEntry<Command>> &log_entries) 
     for (int i = 0; i < data.size() / sizeof(LogEntry<Command>); i++) {
         log_entries.push_back(log_entries_data[i]);
     }
+
+    return true;
+}
+
+template <typename Command>
+auto RaftLog<Command>::recover_snapshot(int &last_included_index, int &last_included_term, std::vector<u8> &snapshot_data) -> bool
+{
+    std::unique_lock<std::mutex> lock(mtx);
+
+    std::vector<u8> data;
+    auto res = operation_->read_file(snapshot_id);
+    if (res.is_err()) {
+        return false;
+    }
+    data = res.unwrap();
+
+    last_included_index = *reinterpret_cast<int *>(data.data());
+    last_included_term = *reinterpret_cast<int *>(data.data() + sizeof(int));
+    snapshot_data = std::vector<u8>(data.begin() + 2 * sizeof(int), data.end());
 
     return true;
 }

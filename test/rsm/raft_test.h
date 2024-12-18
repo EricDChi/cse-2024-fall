@@ -227,7 +227,6 @@ public:
   int AppendNewCommand(int value, int expected_nodes)
   {
     ListCommand cmd(value);
-    std::cout << "AppendNewCommand " << value << std::endl;
     auto start = std::chrono::system_clock::now();
     auto end = start + std::chrono::seconds(3 * retry_time + rand() % 15);
     int leader_idx = 0;
@@ -274,7 +273,6 @@ public:
 
     }
 
-    std::cout << value << " not committed" << std::endl;
     ADD_FAILURE() << "Cannot make agreement";
     return -1;
   }
