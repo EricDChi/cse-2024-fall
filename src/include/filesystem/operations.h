@@ -62,6 +62,9 @@ public:
    */
   auto alloc_inode(InodeType type) -> ChfsResult<inode_id_t>;
 
+  auto alloc_inode_atomic(InodeType type, std::vector<std::shared_ptr<BlockOperation>> &ops)
+      -> ChfsResult<inode_id_t>;
+
   /**
    * Get the file attribute of the given inode
    *
@@ -93,6 +96,9 @@ public:
    */
   auto write_file(inode_id_t, const std::vector<u8> &content) -> ChfsNullResult;
 
+  auto write_file_atomic(inode_id_t id, const std::vector<u8> &content,
+                         std::vector<std::shared_ptr<BlockOperation>> &ops)
+      -> ChfsNullResult;
   /**
    * Write the content to the blocks pointed by the inode
    * If the inode's block is insufficient, we will dynamically allocate more
@@ -112,6 +118,9 @@ public:
    */
   auto read_file(inode_id_t) -> ChfsResult<std::vector<u8>>;
 
+  auto read_file_atomic(inode_id_t id, std::vector<std::shared_ptr<BlockOperation>> &ops)
+      -> ChfsResult<std::vector<u8>>;
+
   /**
    * Read the content to the blocks pointed by the inode
    *
@@ -130,6 +139,9 @@ public:
    */
   auto remove_file(inode_id_t) -> ChfsNullResult;
 
+  auto remove_file_atomic(inode_id_t id, std::vector<std::shared_ptr<BlockOperation>> &ops)
+      -> ChfsNullResult;
+
   /**
    * Get the free blocks of the filesystem.
    * Will read the block bitmap of the underlying filesystem
@@ -141,6 +153,10 @@ public:
    */
   auto lookup(inode_id_t, const char *name) -> ChfsResult<inode_id_t>;
 
+  auto lookup_atomic(inode_id_t id, const char *name,
+                     std::vector<std::shared_ptr<BlockOperation>> &ops)
+      -> ChfsResult<inode_id_t>;
+
   /**
    * Helper function to create directory or file
    *
@@ -148,6 +164,9 @@ public:
    * @param name the name of the directory
    */
   auto mk_helper(inode_id_t parent, const char *name, InodeType type)
+      -> ChfsResult<inode_id_t>;
+
+  auto mknode_atomic(inode_id_t parent, const char *name, InodeType type, std::vector<std::shared_ptr<BlockOperation>> &ops)
       -> ChfsResult<inode_id_t>;
 
   /**
@@ -185,6 +204,21 @@ public:
    * @return  ENOTEMPTY if the deleted file is a directory
    */
   auto unlink(inode_id_t parent, const char *name) -> ChfsNullResult;
+
+  auto unlink_atomic(inode_id_t parent, const char *name,
+                     std::vector<std::shared_ptr<BlockOperation>> &ops)
+      -> ChfsNullResult;
+
+  auto get_block_infos(inode_id_t id) -> ChfsResult<std::vector<BlockInfo>>;
+
+  auto get_block_infos_atomic(inode_id_t id, std::vector<std::shared_ptr<BlockOperation>> &ops)
+      -> ChfsResult<std::vector<BlockInfo>>;
+
+  auto remove_block_info(inode_id_t id, block_id_t block, mac_id_t machine_id)
+      -> ChfsNullResult;
+
+  auto add_block_info(inode_id_t id, BlockInfo block_info)
+      -> ChfsNullResult;
 
 private:
   FileOperation(std::shared_ptr<BlockManager> bm,

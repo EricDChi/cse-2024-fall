@@ -134,6 +134,9 @@ public:
    */
   auto get_block_map(inode_id_t id) -> std::vector<BlockInfo>;
 
+  auto get_block_map_atomic(inode_id_t id, std::vector<std::shared_ptr<BlockOperation>> &ops)
+      -> std::vector<BlockInfo>;
+
   /**
    * A RPC handler for client. It allocate a new block for a file on data server
    * and return the logic block id & node id to client.
@@ -235,6 +238,10 @@ private:
   bool running;
   // Control which data server node allocates the new block
   RandomNumberGenerator generator;
+
+  // Concurrent related
+  std::mutex operation_mutex;
+  std::mutex client_mutex;
 
   // Log related
   [[maybe_unused]] std::shared_ptr<chfs::CommitLog> commit_log;

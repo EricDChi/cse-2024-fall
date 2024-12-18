@@ -11,6 +11,8 @@
 
 #pragma once
 
+#include <cstring>
+
 #include "./inode.h"
 #include "block/allocator.h"
 
@@ -73,6 +75,10 @@ public:
    */
   auto allocate_inode(InodeType type, block_id_t bid) -> ChfsResult<inode_id_t>;
 
+  auto allocate_inode_atomic(InodeType type, block_id_t bid,
+                             std::vector<std::shared_ptr<BlockOperation>> &ops)
+      -> ChfsResult<inode_id_t>;
+
   /**
    * Get the number of free inodes
    * @return the number of free inodes if Ok
@@ -87,10 +93,16 @@ public:
    */
   auto get(inode_id_t id) -> ChfsResult<block_id_t>;
 
+  auto get_atomic(inode_id_t id, std::vector<std::shared_ptr<BlockOperation>> &ops)
+      -> ChfsResult<block_id_t>;
+
   /**
    * Free the inode entry id
    */
   auto free_inode(inode_id_t id) -> ChfsNullResult;
+
+  auto free_inode_atomic(inode_id_t id, std::vector<std::shared_ptr<BlockOperation>> &ops)
+      -> ChfsNullResult;
 
   /**
    * Get the attribute of the inode
@@ -120,6 +132,10 @@ public:
    */
   auto set_table(inode_id_t idx, block_id_t bid) -> ChfsNullResult;
 
+  auto set_table_atomic(inode_id_t idx, block_id_t bid,
+                        std::vector<std::shared_ptr<BlockOperation>> &ops)
+      -> ChfsNullResult;
+
 private:
   /**
    * Simple constructors
@@ -134,6 +150,10 @@ private:
    * @param block_id_t: the block id that stores the inode
    */
   auto read_inode(inode_id_t id, std::vector<u8> &buffer)
+      -> ChfsResult<block_id_t>;
+
+  auto read_inode_atomic(inode_id_t id, std::vector<u8> &buffer,
+                         std::vector<std::shared_ptr<BlockOperation>> &ops)
       -> ChfsResult<block_id_t>;
 };
 
