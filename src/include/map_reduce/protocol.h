@@ -19,7 +19,8 @@ namespace mapReduce {
     enum mr_tasktype {
         NONE = 0,
         MAP,
-        REDUCE
+        REDUCE,
+        MERGE
     };
 
     std::vector<KeyVal> Map(const std::string &content);
@@ -54,7 +55,7 @@ namespace mapReduce {
     class Coordinator {
     public:
         Coordinator(MR_CoordinatorConfig config, const std::vector<std::string> &files, int nReduce);
-        std::tuple<int, int> askTask(int);
+        std::tuple<int, int, int, int, std::string> askTask(int);
         int submitTask(int taskType, int index);
         bool Done();
 
@@ -62,7 +63,15 @@ namespace mapReduce {
         std::vector<std::string> files;
         std::mutex mtx;
         bool isFinished;
+        bool isMergeAssigned;
         std::unique_ptr<chfs::RpcServer> rpc_server;
+
+        std::vector<long> map_tasks;
+        std::vector<long> reduce_tasks;
+        int map_finished;
+        int reduce_finished;
+        int map_num;
+        int reduce_num;
     };
 
     class Worker {
@@ -73,8 +82,9 @@ namespace mapReduce {
 
     private:
         void doMap(int index, const std::string &filename);
-        void doReduce(int index, int nfiles);
+        void doReduce(int index, int nfiles, int nReduce);
         void doSubmit(mr_tasktype taskType, int index);
+        void doMerge(int nReduce);
 
         std::string outPutFile;
         std::unique_ptr<chfs::RpcClient> mr_client;
